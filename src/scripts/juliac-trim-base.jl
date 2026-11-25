@@ -228,7 +228,105 @@ end
 end
 
 @eval Base.CoreLogging begin
-    @inline current_logger_for_env(std_level::LogLevel, group, _module) = nothing
+    # A trimmed program can only call methods it compiled, so it cannot reach a logger that
+    # is chosen at run time. Every record at `Info` and above goes to this logger instead.
+    # It writes each record to `Core.stderr` in `SimpleLogger`'s layout. It shows strings,
+    # symbols, numbers, booleans, `nothing`, modules, and an exception's type and message,
+    # and any other value as its type. Backtraces are not shown, and `with_logger`,
+    # `global_logger`, `maxlog` and `JULIA_DEBUG` have no effect.
+    struct TrimmedLogger <: AbstractLogger end
+
+    @inline current_logger_for_env(std_level::LogLevel, group, _module) =
+        std_level >= Info ? TrimmedLogger() : nothing
+    shouldlog(::TrimmedLogger, level, _module, group, id) = true
+
+    @noinline function show_trimmed_exception(io::IOBuffer, @nospecialize(e))
+        T = typeof(e)
+        print(io, parentmodule(T), '.', nameof(T))
+        for field in (:msg, :message)
+            if hasfield(T, field)
+                text = getfield(e, field)
+                if text isa String || text isa SubString{String}
+                    print(io, ": ", text)
+                    break
+                end
+            end
+        end
+        return nothing
+    end
+
+    # Each `print` gets a concrete argument type, so none of them dispatches at run time.
+    @noinline function show_trimmed(io::IOBuffer, @nospecialize(x))
+        x isa String ? print(io, x::String) :
+        x isa SubString{String} ? print(io, x::SubString{String}) :
+        x isa Symbol ? print(io, x::Symbol) :
+        x isa Char ? print(io, x::Char) :
+        x isa Bool ? print(io, x::Bool) :
+        x isa Nothing ? print(io, "nothing") :
+        x isa Int64 ? print(io, x::Int64) :
+        x isa Int32 ? print(io, x::Int32) :
+        x isa Int16 ? print(io, x::Int16) :
+        x isa Int8 ? print(io, x::Int8) :
+        x isa UInt64 ? print(io, x::UInt64) :
+        x isa UInt32 ? print(io, x::UInt32) :
+        x isa UInt16 ? print(io, x::UInt16) :
+        x isa UInt8 ? print(io, x::UInt8) :
+        x isa Float64 ? print(io, x::Float64) :
+        x isa Float32 ? print(io, x::Float32) :
+        x isa Module ? print(io, x::Module) :
+        x isa LogLevel ? print(io, x === Warn ? "Warning" : string(x::LogLevel)) :
+        x isa Exception ? show_trimmed_exception(io, x) :
+        x isa Tuple{Exception,Any} ? show_trimmed_exception(io, getfield(x, 1)) :
+        print(io, "::", typeof(x))
+        return nothing
+    end
+
+    # `kwargs` is a `NamedTuple`, left unannotated: on an argument annotated `::NamedTuple`,
+    # `typeof` infers as a `where` type, and its `.parameters` access is then unresolved.
+    @noinline function write_trimmed_record(kwargs, level, msg, _module, file, line)
+        @nospecialize
+        text = IOBuffer()
+        show_trimmed(text, msg)
+        buf = IOBuffer()
+        print(buf, "┌ ")
+        show_trimmed(buf, level)
+        print(buf, ": ", replace(chomp(String(take!(text))), '\n' => "\n│ "), '\n')
+        names = typeof(kwargs).parameters[1]
+        for i in 1:nfields(kwargs)
+            key = getfield(names, i)::Symbol
+            key === :maxlog && continue
+            print(buf, "│   ", key, " = ")
+            show_trimmed(buf, getfield(kwargs, i))
+            print(buf, '\n')
+        end
+        print(buf, "└ @ ")
+        show_trimmed(buf, _module)
+        print(buf, ' ')
+        show_trimmed(buf, file)
+        print(buf, ':')
+        show_trimmed(buf, line)
+        print(buf, '\n')
+        # One write per record, so records from different threads do not interleave.
+        write(Core.stderr, take!(buf))
+        return nothing
+    end
+
+    # The logging macros pass keywords whose types may be known only at run time, so take
+    # them as one `NamedTuple` instead of letting the keyword call specialize on them.
+    function Core.kwcall(kwargs::NamedTuple, ::typeof(handle_message_nothrow), ::TrimmedLogger,
+                         level, msg, _module, group, id, file, line)
+        @nospecialize
+        write_trimmed_record(kwargs, level, msg, _module, file, line)
+    end
+    function handle_message_nothrow(::TrimmedLogger, level, msg, _module, group, id, file, line)
+        @nospecialize
+        write_trimmed_record((;), level, msg, _module, file, line)
+    end
+    function logging_error(::TrimmedLogger, level, _module, group, id, file, line, err, real::Bool)
+        @nospecialize
+        write_trimmed_record((; exception = err), Error,
+            "Exception while generating log record", _module, file, line)
+    end
 end
 
 @eval Base.Libc.Libdl begin
