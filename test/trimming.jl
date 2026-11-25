@@ -59,7 +59,8 @@ end
     # 6. _test_cat() result (a Float64)
     # 7. nested reductions with `init` inside a generator reduction
     # 8. regular expressions
-    output = readchomp(`$actual_exe arg1 arg2`)
+    errfile = joinpath(outdir, "stderr.txt")
+    output = readchomp(pipeline(`$actual_exe arg1 arg2`; stderr = errfile))
     lines = split(output, '\n')
     @test length(lines) >= 8
     @test lines[1] == "Hello, world!"
@@ -70,6 +71,12 @@ end
     @test parse(Float64, lines[6]) isa Float64
     @test lines[7] == "nested reductions: 2 9.0"
     @test lines[8] == "regex: julia a#b#c# 4 true"
+
+    # 9. log records on stderr, at `Info` and above
+    log = read(errfile, String)
+    @test occursin("┌ Info: trimmed log\n│   n = 2\n│   path = /v1/status\n└ @ TrimmabilityProject ", log)
+    @test occursin("┌ Warning: caught\n│   exception = Core.ErrorException: boom\n└ @ TrimmabilityProject ", log)
+    @test !occursin("debug records stay hidden", log)
 end
 
 @testset "Trimming: libsimple.jl C application test" begin

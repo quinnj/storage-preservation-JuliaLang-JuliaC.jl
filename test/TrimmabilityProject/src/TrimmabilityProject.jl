@@ -99,6 +99,17 @@ function _test_regex()
     return string("regex: ", user, " ", replaced, " ", vowels, " ", occursin(r"^tr", "trim"))
 end
 
+# log records, which a trimmed program writes to stderr
+function _test_logging(n::Int)
+    @info "trimmed log" n path = "/v1/status"
+    try
+        n > 100 || error("boom")
+    catch e
+        @warn "caught" exception = e
+    end
+    @debug "debug records stay hidden"
+end
+
 function @main(args::Vector{String})::Cint
     println(Core.stdout, str())
     println(Core.stdout, PROGRAM_FILE)
@@ -120,6 +131,7 @@ function @main(args::Vector{String})::Cint
     println(Core.stdout, _test_cat())
     println(Core.stdout, _test_nested_reductions())
     println(Core.stdout, _test_regex())
+    _test_logging(length(args))
 
     try
         sock = connect("localhost", 4900)
